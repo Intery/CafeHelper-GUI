@@ -10,7 +10,8 @@ from ..base import Card, Layout, fielded, Skin
 from ..base.Avatars import avatar_manager
 from ..base.Skin import (
     AssetField, LazyStringField, NumberField,
-    FontField, ColourField, PointField, ComputedField, RawField
+    FontField, ColourField, PointField, ComputedField, RawField, BlobField,
+    FieldDesc
 )
 
 logger = logging.getLogger(__name__)
@@ -76,6 +77,16 @@ class _TimerSkin(Skin):
     date_colour: ColourField = '#6f6e6f'
     date_gap: NumberField = 50
 
+    tag_bg_mask: AssetField = 'timer/user_blob.png'
+    tag_bg_colour: ColourField = None
+    tag_bg_colour_override: ColourField = None
+    tag_bg: BlobField = FieldDesc(
+        BlobField,
+        mask_field='tag_bg_mask',
+        colour_field='tag_bg_colour',
+        colour_field_override='tag_bg_colour_override',
+    )
+
 
 @fielded
 class FocusTimerSkin(_TimerSkin):
@@ -89,6 +100,8 @@ class FocusTimerSkin(_TimerSkin):
         "FOCUS"
     )
     tag: AssetField = "timer/focus_tag.png"
+    tag_bg_colour: ColourField = '#F1A1F120'  # TODO
+
 
 
 @fielded
@@ -103,6 +116,7 @@ class BreakTimerSkin(_TimerSkin):
         "BREAK"
     )
     tag: AssetField = "timer/break_tag.png"
+    tag_bg_colour: ColourField = '#F1A1F120'  # TODO
 
 
 class TimerLayout(Layout):
@@ -113,7 +127,7 @@ class TimerLayout(Layout):
         self.data_remaining = 5 * math.ceil(remaining / 5)
         self.data_duration = duration
         self.data_amount = 1 - remaining / duration if duration else 0
-        self.data_users = sorted(users, key=lambda user: user[1], reverse=True)  # (avatar, time)
+        self.data_users = list(sorted(users, key=lambda user: user[1], reverse=True))  # (avatar, time)
 
     @staticmethod
     def format_time(time, hours=True):
@@ -215,9 +229,37 @@ class TimerLayout(Layout):
         )
         return image
 
-    def draw_user_grid(self) -> Image:
-        users = list(self.data_users)[:25]
+    def draw_user_grid(self) -> Image.Image:
+        if len(self.data_users) > 5:
+            users = self.data_users[:25]
+            return self.draw_user_grid_many(users)
+        else:
+            return self.draw_user_grid_few(self.data_users)
 
+    def draw_user_grid_few(self, users) -> Image.Image:
+        rows = len(users)
+
+        size = (
+            4 * self.skin.grid[0] + self.skin.user_bg.width,
+            (rows - 1) * self.skin.grid[1] + self.skin.user_bg.height + self.skin.tag_gap + self.skin.tag.height
+        )
+
+        image = Image.new(
+            'RGBA',
+            size
+        )
+
+        for i, user in enumerate(users):
+            y = i * self.skin.grid[1]
+
+            user_image = self.draw_user_large(user, size[0])
+            image.alpha_composite(
+                user_image,
+                (0, y)
+            )
+        return image
+
+    def draw_user_grid_many(self, users) -> Image.Image:
         # Set these to 5 and 5 to force top left corner
         rows = math.ceil(len(users) / 5)
         columns = 5
@@ -286,6 +328,101 @@ class TimerLayout(Layout):
                 fill='#FFFFFF',
                 anchor='mm'
             )
+        return image
+
+    def draw_user_large(self, user, width):
+        height = self.skin.user_bg.height
+        image = Image.new('RGBA', (width, height))
+        draw = ImageDraw.Draw(image)
+
+        avatar, time, tag = user
+
+        if tag:
+            blob = self.skin.tag_bg
+            font = self.skin.tag_font
+
+            # Measure the length of the provided text
+            text_width = font.getlength(tag)
+            # tag_width is the length of the tag bg past the end of the user_bg
+            # This includes half a blob worth of space on either side
+            # This does not include the extra blob of rect width at the start
+            tag_width = text_width
+            tag_width = min(tag_width, width - self.skin.user_bg.width)
+            tag_width = int(tag_width)
+
+            x0 = self.skin.user_bg.width - blob.width // 2
+            x1 = x0 + blob.width + tag_width
+
+            # Draw a blob on the end
+            image.paste(blob, (x1 - blob.width // 2, height // 2 - blob.height // 2))
+
+            # Draw a tag rect and blob long enough for the text + margin (with cap)
+            draw.rectangle(
+                [
+                    (x0, height // 2 - blob.height // 2),
+                    (x1, height // 2 + blob.height // 2 -1)
+                ],
+                fill=self.skin.tag_bg_colour,
+                width=0
+            )
+
+            # Write the text onto the tag field
+            draw.text(
+                (x0 + 2 * blob.width // 2, height // 2),
+                tag,
+                anchor='lm',
+                font=self.skin.tag_font,
+                fill='#FFFFFF',
+            )
+
+            image.alpha_composite(self.skin.user_bg)
+
+            # Fix the over-pasted blob
+            mask = Image.new('RGBA', self.skin.user_bg.size)
+            mask.paste(
+                self.skin.tag_bg_mask,
+                (
+                    self.skin.user_bg.width - blob.width - 2,
+                    height // 2 - blob.height // 2 - 1
+                )
+            )
+            image.paste(
+                self.skin.user_bg,
+                mask=mask
+            )
+        else:
+            image.paste(self.skin.user_bg)
+
+        timestr = self.format_time(time, hours=True)
+
+        # Mask avatar
+        avatar.paste((0, 0, 0, 0), mask=self.skin.user_mask.convert('RGBA'))
+
+        # Resize avatar
+        avatar.thumbnail((self.skin.user_bg.height - 10, self.skin.user_bg.height - 10))
+
+        image.alpha_composite(
+            avatar,
+            (5, 5)
+        )
+        draw.text(
+            (120, self.skin.user_bg.height // 2),
+            timestr,
+            anchor='lm',
+            font=self.skin.time_font,
+            fill=self.skin.time_colour
+        )
+        target_height = 3 * (
+                self.skin.user_bg.height + self.skin.tag_gap + self.skin.tag.height
+        ) // 4
+        image = ImageOps.cover(
+                image, 
+                (
+                    1,
+                    target_height,
+                )
+            )
+
         return image
 
     def _draw_progress_bar(self, amount):
@@ -440,8 +577,8 @@ class FocusTimerCard(_TimerCard):
                 ((0, None), 5432, "Going"),
                 ((0, None), 4321, "To"),
                 ((0, None), 3210, "Give"),
-                ((0, None), 2109, "You"),
-                ((0, None), 1098, "Up"),
+                # ((0, None), 2109, "You"),
+                # ((0, None), 1098, "Up"),
             ]
         }
 
@@ -466,11 +603,11 @@ class BreakTimerCard(_TimerCard):
             'duration': 3000,
             'users': [
                 (get_avatar_key(ctx.client, ctx.author.id) if ctx else (0, None), 7055, "SkinShop"),
-                ((0, None), 6543, "Never"),
+                ((0, None), 6543, "Never Going To Give You Up"),
                 ((0, None), 5432, "Going"),
-                ((0, None), 4321, "To"),
-                ((0, None), 3210, "Let"),
-                ((0, None), 2109, "You"),
-                ((0, None), 1098, "Down"),
+                # ((0, None), 4321, "To"),
+                # ((0, None), 3210, "Let"),
+                # ((0, None), 2109, "You"),
+                # ((0, None), 1098, "Down"),
             ]
         }
