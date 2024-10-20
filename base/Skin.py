@@ -173,8 +173,11 @@ class LazyStringField(Field):
         super().__init__(**kwargs)
 
     def load(self):
-        t = ctx_translator.get().t
-        self.value = t(self.data)
+        if isinstance(self.data, str):
+            self.value = self.data
+        else:
+            t = ctx_translator.get().t
+            self.value = t(self.data)
         return self
 
 
@@ -241,7 +244,10 @@ class ComputedField(Field):
         super().__init__(**kwargs)
 
     def load(self):
-        self.value = self.data(self.skin)
+        if callable(self.data):
+            self.value = self.data(self.skin)
+        else:
+            self.value = self.data
         return self
 
 
